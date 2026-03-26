@@ -207,6 +207,38 @@ async def health_check() -> JSONResponse:
     )
 
 
+@app.get("/debug", summary="Muestra operaciones de las primeras propiedades")
+async def debug_operations() -> JSONResponse:
+    """
+    Endpoint de diagnóstico: muestra los tipos de operación que devuelve
+    Tokko para las primeras 5 propiedades. Útil para verificar los nombres
+    exactos y corregir el filtro PROPERTY_TYPES.
+    """
+    loop = asyncio.get_event_loop()
+    properties = await loop.run_in_executor(
+        None, fetch_all_properties, config.TOKKO_API_KEY, config.TOKKO_BASE_URL
+    )
+    sample = []
+    for prop in properties[:5]:
+        ops = prop.get("operations") or []
+        sample.append({
+            "id": prop.get("id"),
+            "title": prop.get("publication_title") or prop.get("address"),
+            "operations": [
+                {
+                    "operation_type": op.get("operation_type"),
+                    "prices": op.get("prices"),
+                }
+                for op in ops
+            ],
+        })
+    return JSONResponse(content={
+        "total_properties": len(properties),
+        "property_types_config": config.PROPERTY_TYPES,
+        "sample": sample,
+    })
+
+
 @app.post("/refresh", summary="Forzar refresco manual del feed")
 async def force_refresh() -> JSONResponse:
     """

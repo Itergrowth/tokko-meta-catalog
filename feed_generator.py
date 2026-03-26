@@ -335,8 +335,8 @@ def generate_feed(
     Returns:
         String con el XML completo del feed, formateado con indentación.
     """
-    # Tipos de operación habilitados
-    enabled_types = [t.strip() for t in property_types.split(",") if t.strip()]
+    # Tipos de operación habilitados (comparación case-insensitive)
+    enabled_types = [t.strip().lower() for t in property_types.split(",") if t.strip()]
     logger.info("Generando feed para tipos de operación: %s", enabled_types)
 
     # ── Estructura RSS 2.0 ────────────────────────────────────────────────────
@@ -364,10 +364,11 @@ def generate_feed(
         operations = prop.get("operations") or []
 
         # Determinar qué operaciones de esta propiedad deben aparecer en el feed
+        # Comparación case-insensitive para tolerar variaciones en Tokko
         ops_to_include: list[str] = []
         for op in operations:
             op_type = op.get("operation_type") or ""
-            if op_type in enabled_types:
+            if op_type.lower() in enabled_types:
                 ops_to_include.append(op_type)
 
         if not ops_to_include:
