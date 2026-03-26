@@ -1,36 +1,30 @@
 """
 feed_generator.py — Generador de feed XML compatible con Meta Ads Home Listings.
 
-Convierte la lista de propiedades de Tokko Broker al formato RSS 2.0 que
-requiere Meta para el catálogo de Home Listings.
-
+Usa el formato XML nativo de Meta (listings/listing), NO RSS 2.0.
 Referencia: https://www.facebook.com/business/help/2524548294518685
 """
 
 import logging
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
-from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # ── Mapeos de Tokko → Meta ─────────────────────────────────────────────────────
 
-# Tipo de operación: nombre en Tokko → valor esperado por Meta
-# Tokko puede devolver los nombres en español o en inglés según la configuración
+# Tipo de operación (case-insensitive): nombre en Tokko → availability en Meta
 OPERATION_TYPE_MAP: dict[str, str] = {
-    # Inglés (API de Tokko)
     "sale": "for_sale",
     "rent": "for_rent",
     "temporary rent": "for_rent",
-    # Español (por compatibilidad)
     "venta": "for_sale",
     "alquiler": "for_rent",
     "alquiler temporario": "for_rent",
 }
 
-# Tipo de propiedad: nombre en Tokko → valor esperado por Meta
+# Tipo de propiedad: nombre en Tokko → property_type en Meta
 PROPERTY_TYPE_MAP: dict[str, str] = {
     "Departamento": "apartment",
     "Casa": "house",
@@ -47,30 +41,12 @@ PROPERTY_TYPE_MAP: dict[str, str] = {
     "PH": "apartment",
 }
 
-# Máximo de imágenes a incluir por propiedad
 MAX_IMAGES = 10
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _escape_xml(text: Optional[str]) -> str:
-    """Escapa caracteres especiales para XML de forma segura."""
-    if text is None:
-        return ""
-    # xml.etree ya escapa &, <, > al setear .text; esta función sirve para
-    # valores que se inyectan como atributos o se construyen manualmente.
-    return (
-        str(text)
-        .replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
-        .replace("'", "&apos;")
-    )
-
-
 def _get_nested(data: dict, *keys, default=None):
-    """Navega un dict anidado de forma segura. Ej: _get_nested(d, 'a', 'b', 'c')."""
     current = data
     for key in keys:
         if not isinstance(current, dict):
@@ -81,54 +57,10 @@ def _get_nested(data: dict, *keys, default=None):
     return current
 
 
-def _build_address(prop: dict) -> tuple[str, str, str, str, str]:
-    """
-    Extrae los componentes de la dirección de una propiedad de Tokko.
-
-    Returns:
-        Tupla (address_full, city, region, postal_code, country)
-    """
-    # Tokko tiene distintos niveles: location → parent_location → ...
-    location = prop.get("location") or {}
-    full_address = prop.get("address") or prop.get("fake_address") or ""
-
-    # Intentar reconstruir la dirección si no viene completa
-    street = prop.get("address") or ""
-    city = (
-        _get_nested(location, "short_display") or
-        _get_nested(location, "name") or
-        ""
-    )
-
-    # Navegar hacia la región / provincia
-    parent = location.get("parent") or {}
-    region = parent.get("name") or ""
-
-    # Intentar conseguir país desde niveles superiores
-    grandparent = parent.get("parent") or {}
-    country = grandparent.get("name") or "Argentina"
-
-    postal_code = prop.get("postal_code") or ""
-
-    if not full_address:
-        parts = [p for p in [street, city, region] if p]
-        full_address = ", ".join(parts)
-
-    return full_address, city, region, postal_code, country
-
-
-def _get_property_type(prop: dict) -> str:
-    """Mapea el tipo de propiedad de Tokko al valor de Meta."""
-    prop_type = _get_nested(prop, "type", "name") or ""
-    return PROPERTY_TYPE_MAP.get(prop_type, "other")
-
-
 def _get_images(prop: dict) -> list[str]:
-    """Extrae las URLs de imágenes de la propiedad (máximo MAX_IMAGES)."""
     photos = prop.get("photos") or []
     urls = []
     for photo in photos[:MAX_IMAGES]:
-        # Tokko puede dar 'image' o 'original' como clave de la URL
         url = photo.get("original") or photo.get("image") or ""
         if url:
             urls.append(url)
@@ -136,8 +68,6 @@ def _get_images(prop: dict) -> list[str]:
 
 
 def _get_area(prop: dict) -> Optional[float]:
-    """Retorna el área total de la propiedad en m²."""
-    # Tokko puede traer total_surface, roofed_surface, etc.
     surface = (
         prop.get("total_surface") or
         prop.get("roofed_surface") or
@@ -151,7 +81,6 @@ def _get_area(prop: dict) -> Optional[float]:
 
 
 def _get_year_built(prop: dict) -> Optional[int]:
-    """Retorna el año de construcción si está disponible."""
     year = prop.get("year") or prop.get("year_built")
     try:
         return int(year) if year else None
@@ -159,206 +88,144 @@ def _get_year_built(prop: dict) -> Optional[int]:
         return None
 
 
-def _build_item(
-    parent: ET.Element,
-    prop: dict,
-    operation_name: str,
-    currency: str,
-    site_base_url: str,
-) -> None:
-    """
-    Agrega un elemento <item> al canal RSS para una propiedad + operación.
+def _get_price(prop: dict, operation_name: str) -> float:
+    """Obtiene el precio en USD para la operación dada."""
+    for op in (prop.get("operations") or []):
+        if (op.get("operation_type") or "").lower() == operation_name.lower():
+            prices = op.get("prices") or []
+            # Preferir precio en USD
+            for p in prices:
+                if (p.get("currency") or "").upper() == "USD" and p.get("price"):
+                    return float(p["price"])
+            # Si no hay USD, tomar el primero disponible
+            if prices and prices[0].get("price"):
+                return float(prices[0]["price"])
+    return 0.0
 
-    Args:
-        parent:         Elemento <channel> al que se agrega el <item>.
-        prop:           Dict con los datos de la propiedad de Tokko.
-        operation_name: Nombre de la operación en Tokko (ej: "Venta").
-        currency:       Código de moneda (ej: "USD").
-        site_base_url:  URL base del sitio (opcional, para construir la URL).
+
+def _build_listing(parent: ET.Element, prop: dict, operation_name: str,
+                   currency: str, site_base_url: str) -> None:
+    """
+    Agrega un elemento <listing> al XML raíz para una propiedad + operación.
+    Formato: Meta Home Listings XML nativo.
     """
     prop_id = prop.get("id", "")
     meta_availability = OPERATION_TYPE_MAP.get(operation_name.lower(), "for_sale")
+    listing_id = f"{prop_id}_sale" if meta_availability == "for_sale" else f"{prop_id}_rent"
 
-    # ID único por operación para evitar colisiones cuando una propiedad
-    # aparece tanto en Venta como en Alquiler.
-    if meta_availability == "for_sale":
-        listing_id = f"{prop_id}_sale"
-    else:
-        listing_id = f"{prop_id}_rent"
-
-    # ── Precio ───────────────────────────────────────────────────────────────
-    # Buscar el precio correspondiente a la operación actual
-    price_value = 0
-    operations = prop.get("operations") or []
-    for op in operations:
-        op_type = _get_nested(op, "operation_type") or ""
-        if op_type == operation_name:
-            prices = op.get("prices") or []
-            if prices:
-                price_value = prices[0].get("price") or 0
-            break
-
-    try:
-        price_value = float(price_value)
-    except (ValueError, TypeError):
-        price_value = 0.0
-
+    # ── Precio ────────────────────────────────────────────────────────────────
+    price_value = _get_price(prop, operation_name)
     price_str = f"{int(price_value)} {currency}"
     availability = meta_availability if price_value > 0 else "off_market"
 
-    # ── URL de la propiedad ──────────────────────────────────────────────────
-    prop_url = prop.get("public_url") or prop.get("url") or ""
+    # ── URL ───────────────────────────────────────────────────────────────────
     if site_base_url and prop_id:
-        # Si el operador tiene su propio sitio, construir la URL con su dominio
         prop_url = f"{site_base_url.rstrip('/')}/propiedad/{prop_id}"
-    if not prop_url:
-        prop_url = f"https://www.tokkobroker.com/propiedades/{prop_id}"
+    else:
+        prop_url = prop.get("public_url") or prop.get("url") or \
+                   f"https://www.tokkobroker.com/propiedades/{prop_id}"
 
-    # ── Descripción ──────────────────────────────────────────────────────────
+    # ── Textos ────────────────────────────────────────────────────────────────
     description = prop.get("description") or prop.get("description_es") or ""
-    # Limpiar saltos de línea excesivos
-    description = " ".join(description.split())
-    if not description:
-        description = f"Propiedad en {operation_name.lower()}"
-
-    # ── Título ───────────────────────────────────────────────────────────────
+    description = " ".join(description.split()) or f"Propiedad en {operation_name.lower()}"
     title = prop.get("publication_title") or prop.get("address") or f"Propiedad {prop_id}"
 
-    # ── Dirección ────────────────────────────────────────────────────────────
-    full_address, city, region, postal_code, country = _build_address(prop)
+    # ── Dirección ─────────────────────────────────────────────────────────────
+    location = prop.get("location") or {}
+    street = prop.get("address") or prop.get("fake_address") or ""
+    city = _get_nested(location, "short_display") or _get_nested(location, "name") or ""
+    parent_loc = location.get("parent") or {}
+    region = parent_loc.get("name") or ""
+    postal_code = str(prop.get("postal_code") or "")
 
-    # ── Coordenadas ──────────────────────────────────────────────────────────
-    lat = prop.get("geo_lat") or prop.get("latitude") or ""
-    lon = prop.get("geo_long") or prop.get("longitude") or ""
-
-    # ── Imágenes ─────────────────────────────────────────────────────────────
+    # ── Extras ────────────────────────────────────────────────────────────────
+    lat = str(prop.get("geo_lat") or prop.get("latitude") or "")
+    lon = str(prop.get("geo_long") or prop.get("longitude") or "")
+    neighborhood = _get_nested(prop, "location", "name") or prop.get("neighborhood") or ""
+    num_beds = str(prop.get("bedrooms") or prop.get("suite_amount") or "")
+    num_baths = str(prop.get("bathrooms") or prop.get("full_baths") or "")
+    prop_type = PROPERTY_TYPE_MAP.get(_get_nested(prop, "type", "name") or "", "other")
+    area = _get_area(prop)
+    year_built = _get_year_built(prop)
     images = _get_images(prop)
 
-    # ── Barrio / Vecindario ───────────────────────────────────────────────────
-    neighborhood = (
-        _get_nested(prop, "location", "name") or
-        prop.get("neighborhood") or
-        ""
-    )
-
-    # ── Ambientes, baños, dormitorios ─────────────────────────────────────────
-    num_beds = prop.get("bedrooms") or prop.get("suite_amount") or ""
-    num_baths = prop.get("bathrooms") or prop.get("full_baths") or ""
-
-    # ── Tipo de propiedad ─────────────────────────────────────────────────────
-    prop_type_meta = _get_property_type(prop)
-
-    # ── Área ──────────────────────────────────────────────────────────────────
-    area = _get_area(prop)
-
-    # ── Año de construcción ───────────────────────────────────────────────────
-    year_built = _get_year_built(prop)
-
     # ═══════════════════════════════════════════════════════════════════════════
-    # Construcción del elemento <item>
-    # Meta requiere el namespace g: para los campos de Home Listings
+    # Construcción del <listing> en formato nativo Meta
     # ═══════════════════════════════════════════════════════════════════════════
-    item = ET.SubElement(parent, "item")
+    listing = ET.SubElement(parent, "listing")
 
-    def add(tag: str, value: Optional[str]) -> None:
-        """Agrega un sub-elemento con texto, omitiendo si el valor está vacío."""
+    def add(tag: str, value) -> None:
         if value is not None and str(value).strip():
-            el = ET.SubElement(item, tag)
+            el = ET.SubElement(listing, tag)
             el.text = str(value).strip()
 
-    # Campos requeridos por Meta Home Listings
-    add("g:home_listing_id", str(listing_id))
-    add("g:name", title)
-    add("g:availability", availability)
-    add("g:description", description)
-    add("g:price", price_str)
-    add("g:url", prop_url)
+    # Campos requeridos
+    add("home_listing_id", listing_id)
+    add("name", title)
+    add("availability", availability)
+    add("description", description)
+    add("price", price_str)
+    add("url", prop_url)
 
-    # Dirección estructurada (requerida)
-    addr_el = ET.SubElement(item, "g:address")
-    add_addr = lambda tag, val: (
-        ET.SubElement(addr_el, tag).__setattr__("text", str(val).strip())
-        if val and str(val).strip() else None
-    )
-    if full_address:
-        ET.SubElement(addr_el, "g:addr1").text = full_address
-    if city:
-        ET.SubElement(addr_el, "g:city").text = city
-    if region:
-        ET.SubElement(addr_el, "g:region").text = region
+    # Imágenes — formato <image url="..."/>
+    for img_url in images:
+        img_el = ET.SubElement(listing, "image")
+        img_el.set("url", img_url)
+
+    # Dirección — formato <address format="simple"><component name="...">
+    addr_el = ET.SubElement(listing, "address")
+    addr_el.set("format", "simple")
+
+    def add_component(name: str, value: str) -> None:
+        if value and value.strip():
+            comp = ET.SubElement(addr_el, "component")
+            comp.set("name", name)
+            comp.text = value.strip()
+
+    add_component("addr1", street)
+    add_component("city", city)
+    add_component("region", region)
+    add_component("country", "AR")
     if postal_code:
-        ET.SubElement(addr_el, "g:postal_code").text = str(postal_code)
-    ET.SubElement(addr_el, "g:country").text = country
+        add_component("postal_code", postal_code)
 
-    # Imágenes: la primera es el campo image principal, el resto son image_link adicionales
-    if images:
-        add("g:image", images[0])
-        for extra_img in images[1:]:
-            add("g:additional_image_link", extra_img)
-    else:
-        # Meta requiere al menos una imagen; si no hay, se deja el campo vacío
-        # y la propiedad probablemente sea rechazada, pero no queremos romper el feed.
-        logger.warning("Propiedad %s no tiene imágenes.", prop_id)
-
-    # Campos opcionales pero recomendados
-    if lat:
-        add("g:latitude", str(lat))
-    if lon:
-        add("g:longitude", str(lon))
-    if neighborhood:
-        add("g:neighborhood", neighborhood)
-    if num_baths:
-        add("g:num_baths", str(num_baths))
-    if num_beds:
-        add("g:num_beds", str(num_beds))
+    # Campos opcionales recomendados
+    add("latitude", lat)
+    add("longitude", lon)
+    add("neighborhood", neighborhood)
+    add("num_baths", num_baths)
+    add("num_beds", num_beds)
+    add("property_type", prop_type)
+    add("listing_type", meta_availability)
     if area:
-        add("g:area", f"{area} SQ_M")
-    if prop_type_meta:
-        add("g:property_type", prop_type_meta)
-    if year_built:
-        add("g:year_built", str(year_built))
-    if listing_id:
-        add("g:listing_type", meta_availability)
+        area_el = ET.SubElement(listing, "area")
+        area_el.set("unit", "square_meters")
+        area_el.text = str(int(area))
+    add("year_built", str(year_built) if year_built else None)
 
 
 def generate_feed(
     properties: list[dict],
-    property_types: str = "Venta,Alquiler",
+    property_types: str = "Sale,Rent",
     currency: str = "USD",
     site_base_url: str = "",
 ) -> str:
     """
-    Genera el XML del catálogo Meta Ads Home Listings a partir de la lista
-    de propiedades de Tokko Broker.
+    Genera el XML del catálogo Meta Ads Home Listings (formato nativo Meta).
 
     Args:
         properties:     Lista de dicts con propiedades de Tokko.
-        property_types: String con tipos de operación separados por coma.
+        property_types: No usado (se incluyen todas las ops del mapa).
         currency:       Código de moneda para los precios.
         site_base_url:  URL base del sitio para construir URLs de propiedades.
 
     Returns:
-        String con el XML completo del feed, formateado con indentación.
+        String con el XML completo del feed.
     """
-    logger.info("Generando feed. Tipos en OPERATION_TYPE_MAP: %s", list(OPERATION_TYPE_MAP.keys()))
+    logger.info("Generando feed Meta Home Listings (formato nativo)...")
 
-    # ── Estructura RSS 2.0 ────────────────────────────────────────────────────
-    # Meta requiere que el namespace g: esté declarado en el elemento raíz <rss>
-    rss = ET.Element("rss")
-    rss.set("version", "2.0")
-    rss.set("xmlns:g", "http://base.google.com/ns/1.0")
-
-    channel = ET.SubElement(rss, "channel")
-
-    # Metadatos del canal
-    ET.SubElement(channel, "title").text = "Tokko Broker — Home Listings para Meta Ads"
-    ET.SubElement(channel, "link").text = site_base_url or "https://www.tokkobroker.com"
-    ET.SubElement(channel, "description").text = (
-        "Feed de propiedades inmobiliarias generado automáticamente para Meta Ads Home Listings."
-    )
-    ET.SubElement(channel, "lastBuildDate").text = (
-        datetime.now(timezone.utc).strftime("%a, %d %b %Y %H:%M:%S +0000")
-    )
+    # Elemento raíz <listings>
+    root = ET.Element("listings")
 
     item_count = 0
     skipped_count = 0
@@ -366,51 +233,35 @@ def generate_feed(
     for prop in properties:
         operations = prop.get("operations") or []
 
-        # Incluir todas las operaciones que tengan un mapeo en OPERATION_TYPE_MAP
-        # (case-insensitive). Esto evita depender de la variable PROPERTY_TYPES.
-        ops_to_include: list[str] = []
-        for op in operations:
-            op_type = op.get("operation_type") or ""
-            if op_type.lower() in OPERATION_TYPE_MAP:
-                ops_to_include.append(op_type)
+        ops_to_include = [
+            op.get("operation_type")
+            for op in operations
+            if (op.get("operation_type") or "").lower() in OPERATION_TYPE_MAP
+        ]
 
         if not ops_to_include:
             skipped_count += 1
             continue
 
-        # Si una propiedad tiene múltiples operaciones habilitadas (ej: Venta Y Alquiler),
-        # se crea un <item> independiente por cada una con IDs únicos.
         for op_name in ops_to_include:
             try:
-                _build_item(channel, prop, op_name, currency, site_base_url)
+                _build_listing(root, prop, op_name, currency, site_base_url)
                 item_count += 1
             except Exception as exc:  # pylint: disable=broad-except
-                prop_id = prop.get("id", "desconocido")
                 logger.error(
-                    "Error al generar item para propiedad %s (operación: %s): %s",
-                    prop_id,
-                    op_name,
-                    exc,
-                    exc_info=True,
+                    "Error al generar listing para propiedad %s (%s): %s",
+                    prop.get("id", "?"), op_name, exc, exc_info=True,
                 )
                 skipped_count += 1
 
-    logger.info(
-        "Feed generado: %d items incluidos, %d propiedades omitidas.",
-        item_count,
-        skipped_count,
-    )
+    logger.info("Feed generado: %d listings, %d omitidos.", item_count, skipped_count)
 
-    # ── Serializar a string XML con indentación legible ───────────────────────
-    raw_xml = ET.tostring(rss, encoding="unicode", xml_declaration=False)
-
-    # minidom para pretty-print con declaración XML correcta
+    # Serializar con pretty-print
+    raw_xml = ET.tostring(root, encoding="unicode", xml_declaration=False)
     dom = minidom.parseString(raw_xml)
     pretty_xml = dom.toprettyxml(indent="  ", encoding=None)
 
-    # toprettyxml agrega su propia declaración XML; la reemplazamos por la estándar
     lines = pretty_xml.splitlines()
-    # La primera línea es la declaración XML de minidom; la descartamos y ponemos la nuestra
     if lines and lines[0].startswith("<?xml"):
         lines[0] = '<?xml version="1.0" encoding="UTF-8"?>'
     return "\n".join(lines)
