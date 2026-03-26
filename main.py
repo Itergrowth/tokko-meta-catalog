@@ -239,6 +239,20 @@ async def debug_operations() -> JSONResponse:
     })
 
 
+@app.get("/refresh", summary="Forzar refresco manual del feed (GET)")
+async def force_refresh_get() -> JSONResponse:
+    """Igual que POST /refresh pero accesible desde el navegador directamente."""
+    logger.info("Refresco manual solicitado vía GET /refresh")
+    await refresh_feed()
+    last_updated: Optional[datetime] = feed_cache.get("last_updated")
+    return JSONResponse(content={
+        "status": "ok" if not feed_cache.get("error") else "error",
+        "message": "Feed refrescado exitosamente." if not feed_cache.get("error") else feed_cache.get("error"),
+        "last_updated": last_updated.isoformat() if last_updated else None,
+        "property_count": feed_cache.get("property_count", 0),
+    })
+
+
 @app.post("/refresh", summary="Forzar refresco manual del feed")
 async def force_refresh() -> JSONResponse:
     """
