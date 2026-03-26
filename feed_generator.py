@@ -147,8 +147,12 @@ def _build_listing(parent: ET.Element, prop: dict, operation_name: str,
     lat = str(prop.get("geo_lat") or prop.get("latitude") or "")
     lon = str(prop.get("geo_long") or prop.get("longitude") or "")
     neighborhood = _get_nested(prop, "location", "name") or prop.get("neighborhood") or ""
-    num_beds = str(prop.get("bedrooms") or prop.get("suite_amount") or "")
-    num_baths = str(prop.get("bathrooms") or prop.get("full_baths") or "")
+    # Campos correctos de la API de Tokko:
+    # suite_amount = dormitorios, bathroom_amount = baños, room_amount = ambientes
+    _beds_val = prop.get("suite_amount") if prop.get("suite_amount") is not None else prop.get("bedrooms")
+    _baths_val = prop.get("bathroom_amount") if prop.get("bathroom_amount") is not None else prop.get("bathrooms")
+    num_beds = str(_beds_val) if _beds_val not in (None, "", 0) else ""
+    num_baths = str(_baths_val) if _baths_val not in (None, "", 0) else ""
     prop_type = PROPERTY_TYPE_MAP.get(_get_nested(prop, "type", "name") or "", "other")
     area = _get_area(prop)
     year_built = _get_year_built(prop)
