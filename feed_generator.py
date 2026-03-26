@@ -134,8 +134,17 @@ def _build_listing(parent: ET.Element, prop: dict, operation_name: str,
     location = prop.get("location") or {}
     street = prop.get("address") or prop.get("fake_address") or ""
     city = _get_nested(location, "short_display") or _get_nested(location, "name") or ""
+    # Navegar toda la jerarquía para encontrar la provincia/región
     parent_loc = location.get("parent") or {}
-    region = parent_loc.get("name") or ""
+    grandparent_loc = parent_loc.get("parent") or {}
+    great_grandparent_loc = grandparent_loc.get("parent") or {}
+    region = (
+        great_grandparent_loc.get("name") or
+        grandparent_loc.get("name") or
+        parent_loc.get("name") or
+        city or  # fallback: usar la ciudad como región
+        "Buenos Aires"  # fallback final
+    )
     postal_code = str(prop.get("postal_code") or "")
 
     # ── Extras ────────────────────────────────────────────────────────────────
@@ -167,10 +176,11 @@ def _build_listing(parent: ET.Element, prop: dict, operation_name: str,
     add("price", price_str)
     add("url", prop_url)
 
-    # Imágenes — formato <image url="..."/>
+    # Imágenes — formato <image><url>...</url></image> requerido por Meta
     for img_url in images:
         img_el = ET.SubElement(listing, "image")
-        img_el.set("url", img_url)
+        url_el = ET.SubElement(img_el, "url")
+        url_el.text = img_url
 
     # Dirección — formato <address format="simple"><component name="...">
     addr_el = ET.SubElement(listing, "address")
