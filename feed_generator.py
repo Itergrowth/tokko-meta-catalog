@@ -119,11 +119,9 @@ def _build_listing(parent: ET.Element, prop: dict, operation_name: str,
     availability = meta_availability if price_value > 0 else "off_market"
 
     # ── URL ───────────────────────────────────────────────────────────────────
-    if site_base_url and prop_id:
-        prop_url = f"{site_base_url.rstrip('/')}/propiedad/{prop_id}"
-    else:
-        prop_url = prop.get("public_url") or prop.get("url") or \
-                   f"https://www.tokkobroker.com/propiedades/{prop_id}"
+    # Usar siempre la URL pública que devuelve Tokko (es la URL real del sitio)
+    prop_url = prop.get("public_url") or prop.get("url") or \
+               f"https://www.tokkobroker.com/propiedades/{prop_id}"
 
     # ── Textos ────────────────────────────────────────────────────────────────
     description = prop.get("description") or prop.get("description_es") or ""
