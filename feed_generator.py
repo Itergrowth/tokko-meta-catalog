@@ -18,11 +18,16 @@ logger = logging.getLogger(__name__)
 # ── Mapeos de Tokko → Meta ─────────────────────────────────────────────────────
 
 # Tipo de operación: nombre en Tokko → valor esperado por Meta
+# Tokko puede devolver los nombres en español o en inglés según la configuración
 OPERATION_TYPE_MAP: dict[str, str] = {
-    "Venta": "for_sale",
-    "Alquiler": "for_rent",
-    "Alquiler temporario": "for_rent",
-    "Alquiler Temporario": "for_rent",
+    # Inglés (API de Tokko)
+    "sale": "for_sale",
+    "rent": "for_rent",
+    "temporary rent": "for_rent",
+    # Español (por compatibilidad)
+    "venta": "for_sale",
+    "alquiler": "for_rent",
+    "alquiler temporario": "for_rent",
 }
 
 # Tipo de propiedad: nombre en Tokko → valor esperado por Meta
@@ -172,7 +177,7 @@ def _build_item(
         site_base_url:  URL base del sitio (opcional, para construir la URL).
     """
     prop_id = prop.get("id", "")
-    meta_availability = OPERATION_TYPE_MAP.get(operation_name, "for_sale")
+    meta_availability = OPERATION_TYPE_MAP.get(operation_name.lower(), "for_sale")
 
     # ID único por operación para evitar colisiones cuando una propiedad
     # aparece tanto en Venta como en Alquiler.
